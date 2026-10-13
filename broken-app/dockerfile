@@ -1,0 +1,4 @@
+FROM nginx:alpine
+RUN rm -f /usr/share/nginx/html/index.html \
+    && echo 'Test failure' > /usr/share/nginx/html/index.html \
+    && chmod 000 /usr/share/nginx/html/index.html
