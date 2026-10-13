@@ -1,0 +1,30 @@
+
+name: Blue-Green Deployment
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test-runner:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check runner user
+        run: whoami
+
+      - name: Check Docker access
+        run: docker ps
+
+      - name: Check passwordless sudo
+        run: |
+          if sudo -n true; then
+            echo "Passwordless sudo is available"
+          else
+            echo "Passwordless sudo is not available"
+          fi
