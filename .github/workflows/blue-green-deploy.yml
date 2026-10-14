@@ -8,23 +8,22 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-runner:
+  deploy:
     runs-on: self-hosted
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check runner user
-        run: whoami
-
       - name: Check Docker access
         run: docker ps
 
-      - name: Check passwordless sudo
-        run: |
-          if sudo -n true; then
-            echo "Passwordless sudo is available"
-          else
-            echo "Passwordless sudo is not available"
-          fi
+      - name: Check deployment script syntax
+        run: bash -n deploy.sh
+
+      - name: Build Docker image
+        run: docker build -f dockerfile -t blue-green-demo:v2 .
+
+      - name: Deploy application
+        run: bash deploy.sh blue-green-demo:v2
+

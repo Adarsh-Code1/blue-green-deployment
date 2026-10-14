@@ -2,7 +2,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-APP_DIR="$HOME/blue-green-demo"
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NGINX_CONFIG="/etc/nginx/sites-available/blue-green-demo"
 NGINX_PORT=8080
 IMAGE="${1:-blue-green-demo:v2}"
@@ -13,7 +13,7 @@ cd "$APP_DIR"
 echo "Starting deployment of $IMAGE"
 
 # Find the active Nginx target, ignoring commented lines.
-ACTIVE_PORT=$(sudo awk '
+ACTIVE_PORT=$( awk '
     /^[[:space:]]*#/ { next }
     /proxy_pass http:\/\/127\.0\.0\.1:[0-9]+;/ {
         line = $0
@@ -35,7 +35,7 @@ echo "Current active port: $ACTIVE_PORT"
 NEW_PORT=""
 
 for PORT in $(shuf -i 2000-2100 -n 101); do
-    if ! sudo ss -H -ltn "( sport = :$PORT )" | grep -q . &&
+    if !  ss -H -ltn "( sport = :$PORT )" | grep -q . &&
        ! docker ps --format '{{.Ports}}' |
            grep -qE "(^|[:, ])${PORT}->"; then
         NEW_PORT="$PORT"
@@ -84,37 +84,34 @@ fi
 echo "Candidate health check passed."
 
 # Save the original Nginx configuration for rollback.
-sudo cp "$NGINX_CONFIG" "$BACKUP_CONFIG"
+sudo -n /usr/local/sbin/blue-green-nginx backup
 
-# Replace only the active proxy_pass target.
-if ! sudo sed -i \
-    "/^[[:space:]]*#/! s|proxy_pass http://127.0.0.1:${ACTIVE_PORT};|proxy_pass http://127.0.0.1:${NEW_PORT};|" \
-    "$NGINX_CONFIG"; then
-    echo "ERROR: Could not update Nginx configuration."
-    sudo cp "$BACKUP_CONFIG" "$NGINX_CONFIG"
+# Switch Nginx to the candidate port.
+if ! sudo -n /usr/local/sbin/blue-green-nginx switch "$NEW_PORT"; then
+    echo "ERROR: Could not update Nginx configuration. Rolling back."
+    sudo -n /usr/local/sbin/blue-green-nginx restore
     docker rm -f "$NEW_CONTAINER" || true
     exit 1
 fi
 
-# Validate the configuration before reloading Nginx.
-if ! sudo nginx -t; then
+# Validate the Nginx configuration.
+if ! sudo -n /usr/local/sbin/blue-green-nginx test; then
     echo "ERROR: Nginx configuration test failed. Rolling back."
-    sudo cp "$BACKUP_CONFIG" "$NGINX_CONFIG"
-    sudo nginx -t && sudo systemctl reload nginx
+    sudo -n /usr/local/sbin/blue-green-nginx restore
     docker rm -f "$NEW_CONTAINER" || true
     exit 1
 fi
 
-# Reload Nginx to send traffic to the candidate.
-if ! sudo systemctl reload nginx; then
+# Reload Nginx.
+if ! sudo -n /usr/local/sbin/blue-green-nginx reload; then
     echo "ERROR: Nginx reload failed. Rolling back."
-    sudo cp "$BACKUP_CONFIG" "$NGINX_CONFIG"
-    sudo nginx -t && sudo systemctl reload nginx
+    sudo -n /usr/local/sbin/blue-green-nginx restore
     docker rm -f "$NEW_CONTAINER" || true
     exit 1
 fi
 
 # Verify the application through Nginx.
+
 
 # Determine the expected version from the image tag.
 case "$IMAGE" in
@@ -122,8 +119,7 @@ case "$IMAGE" in
     *:v2) EXPECTED_VERSION="Blue v2" ;;
     *)
         echo "ERROR: Unknown image version: $IMAGE"
-        sudo cp "$BACKUP_CONFIG" "$NGINX_CONFIG"
-        sudo nginx -t && sudo systemctl reload nginx
+    sudo -n /usr/local/sbin/blue-green-nginx restore
         docker rm -f "$NEW_CONTAINER" || true
         exit 1
         ;;
@@ -134,8 +130,7 @@ if ! curl -fsS --max-time 5 \
     "http://127.0.0.1:$NGINX_PORT/" |
     grep -Fq "$EXPECTED_VERSION"; then
     echo "ERROR: Version verification failed. Rolling back."
-    sudo cp "$BACKUP_CONFIG" "$NGINX_CONFIG"
-    sudo nginx -t && sudo systemctl reload nginx
+    sudo -n /usr/local/sbin/blue-green-nginx restore
     docker rm -f "$NEW_CONTAINER" || true
     exit 1
 fi
@@ -145,29 +140,19 @@ echo "Deployment successful!"
 echo "Active port: $NEW_PORT"
 echo "Active container: $NEW_CONTAINER"
 
-# Remove the previous container only after successful verification.
-OLD_CONTAINER=""
 
-for NAME in blue-container green-container; do
-    if docker inspect "$NAME" >/dev/null 2>&1; then
-        OLD_PORT=$(docker inspect -f \
-            '{{(index (index .NetworkSettings.Ports "80/tcp") 0).HostPort}}' \
-            "$NAME" 2>/dev/null || true)
+# Remove old Blue-Green containers after successful verification.
+for NAME in $(docker ps -a --format '{{.Names}}' |
+    grep -E '^(blue-candidate-|blue-container$|green-container$)' || true); do
 
-        if [[ "$OLD_PORT" == "$ACTIVE_PORT" ]]; then
-            OLD_CONTAINER="$NAME"
-            break
-        fi
+    if [[ "$NAME" != "$NEW_CONTAINER" ]]; then
+        echo "Removing previous container: $NAME"
+        docker rm -f "$NAME" || \
+            echo "WARNING: Could not remove $NAME."
     fi
 done
 
-if [[ -n "$OLD_CONTAINER" ]]; then
-    echo "Removing previous container: $OLD_CONTAINER"
-    docker rm -f "$OLD_CONTAINER" || \
-        echo "WARNING: Could not remove $OLD_CONTAINER."
-fi
-
-sudo rm -f "$BACKUP_CONFIG"
+sudo -n /usr/local/sbin/blue-green-nginx cleanup
 
 echo "Blue-Green deployment completed."
 
